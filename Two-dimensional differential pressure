@@ -1,0 +1,185 @@
+
+#include "palabos2D.h"
+#include "palabos2D.hh"
+#include <cstdlib>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <vector>
+#include <cmath>
+
+using namespace plb;
+using namespace std;
+
+// Use double-precision arithmetics
+typedef double T;
+// Use a grid which additionally to the f's stores two variables for
+//   the external force term.
+#define DESCRIPTOR descriptors::ForcedShanChenD2Q9Descriptor
+
+void PorousMediaSetup( MultiBlockLattice2D<T, DESCRIPTOR>& lattice_fluid1,
+                          MultiBlockLattice2D<T, DESCRIPTOR>& lattice_fluid2,T runs)
+{
+
+   plint nx = lattice_fluid2.getNx();
+   plint ny = lattice_fluid2.getNy();
+   pcout << "Definition of the geometry." << endl;
+
+   defineDynamics(lattice_fluid1, Box2D(0,nx-1, 0,0), new BounceBack<T, DESCRIPTOR>() );
+   defineDynamics(lattice_fluid2, Box2D(0,nx-1, 0,0), new BounceBack<T, DESCRIPTOR>(0.4) );
+   defineDynamics(lattice_fluid2, Box2D(0,nx-1, ny-1,ny-1), new BounceBack<T, DESCRIPTOR>(0.4) );
+   defineDynamics(lattice_fluid1, Box2D(0,nx-1, ny-1,ny-1), new BounceBack<T, DESCRIPTOR>() );
+   T rho_f1 =2.0;
+   T rho_f2 =2.0;
+   T rhoNOfluid=0.006;
+
+
+    Array<T, 2> zeroVelocity(0., 0.);
+
+
+    initializeAtEquilibrium(lattice_fluid2, Box2D(51, nx-1, 0, ny-1), rho_f2, zeroVelocity);
+    initializeAtEquilibrium(lattice_fluid1, Box2D(51, nx-1, 0, ny-1), rhoNOfluid, zeroVelocity);
+    initializeAtEquilibrium(lattice_fluid1, Box2D(0, 50, 0, ny-1), rho_f1, zeroVelocity);
+    initializeAtEquilibrium(lattice_fluid2, Box2D(0, 50, 0, ny-1), rhoNOfluid, zeroVelocity);
+
+
+    lattice_fluid1.initialize();
+    lattice_fluid2.initialize();
+
+}
+
+
+void writeGifs(MultiBlockLattice2D<T, DESCRIPTOR>& lattice_fluid1,
+               MultiBlockLattice2D<T, DESCRIPTOR>& lattice_fluid2, plint iT)
+{
+    ImageWriter<T> imageWriter("leeloo.map");
+    imageWriter.writeScaledGif(createFileName("rho_fluid1_", iT, 6),
+                               *computeDensity(lattice_fluid1));
+    imageWriter.writeScaledGif(createFileName("rho_fluid2_", iT, 6),
+                               *computeDensity(lattice_fluid2));
+}
+
+
+int main(int argc, char *argv[])
+{
+    clock_t t;
+    t = clock();
+    plbInit(&argc, &argv);
+    global::directories().setOutputDir("./tmp/");
+    srand(global::mpi().getRank());
+
+    const T omega1 = 1.0;
+    const T omega2 = 1.0;
+    const plint nx   = 600;
+    const plint ny   = 100;
+    const T G      = 1.2;
+    const plint maxIter  = 16000;
+    const plint saveIter = 100;
+    const plint statIter = 10;
+    T rho_f1_inlet=3.0 ;
+    T rho_f2_outlet_initial=2.0;
+    T rho_f2_outlet_final=1;
+    T rhoNoFluid=0.06;
+    T drho_f2=0.05;
+
+    plint runnum = ((rho_f2_outlet_initial - rho_f2_outlet_final)/drho_f2)+1;
+    T rho_fluid1[runnum] ;
+    T rho_fluid2[runnum] ;
+    T deltaP[runnum];
+
+    for (plint readnum = 1; readnum <= runnum; ++readnum) {
+              rho_fluid2[readnum] = rho_f2_outlet_initial - (readnum-1)*drho_f2;
+              pcout << "Rho_no_2 = " << rho_fluid2[readnum] << endl;
+              rho_fluid1[readnum] = rho_f1_inlet;
+            }
+    rho_fluid2[1]=rho_fluid2[1]+0.02;
+
+    // Use regularized BGK dynamics to improve numerical stability (but note that
+    //   BGK dynamics works well too).
+    MultiBlockLattice2D<T, DESCRIPTOR> lattice_fluid1 (
+            nx,ny, new ExternalMomentRegularizedBGKdynamics<T, DESCRIPTOR>(omega1) );
+    MultiBlockLattice2D<T, DESCRIPTOR> lattice_fluid2 (
+            nx,ny, new ExternalMomentRegularizedBGKdynamics<T, DESCRIPTOR>(omega2) );
+    lattice_fluid2.periodicity().toggle(0, false);
+    lattice_fluid1.periodicity().toggle(0, false);
+    lattice_fluid2.periodicity().toggle(1, false);
+    lattice_fluid1.periodicity().toggle(1, false);
+
+
+    vector<MultiBlockLattice2D<T, DESCRIPTOR>* > blockLattices;
+    blockLattices.push_back(&lattice_fluid2);
+    blockLattices.push_back(&lattice_fluid1);
+
+    // The argument "constOmegaValues" to the Shan/Chen processor is optional,
+    //   and is used for efficiency reasons only. It tells the data processor
+    //   that the relaxation times are constant, and that their inverse must be
+    //   computed only once.
+    std::vector<T> constOmegaValues;
+    constOmegaValues.push_back(omega2);
+    constOmegaValues.push_back(omega1);
+    plint processorLevel = 1;
+    integrateProcessingFunctional (
+            new ShanChenMultiComponentProcessor2D<T,DESCRIPTOR>(G,constOmegaValues),
+            Box2D(0,nx-1,1,ny-2),
+            blockLattices,
+            processorLevel );
+    for (plint readnum = 1; readnum <= runnum; ++readnum) {
+                      deltaP[readnum]=(rho_fluid1[readnum]-rho_fluid2[readnum])/3;
+                      pcout << "Run number = " << readnum << endl;
+                      pcout << "Rho_no_1 = " << rho_fluid1[readnum] << endl;
+                      pcout << "Rho_no_2 = " << rho_fluid2[readnum] << endl;
+                    }
+     for (plint runs = 1; runs <= runnum; ++runs) {
+
+                    // turn off stats for efficency
+                    lattice_fluid1.toggleInternalStatistics(false);
+                    lattice_fluid2.toggleInternalStatistics(false);
+
+             if (runs > 1)
+                    {
+                      pcout << "Using previous simulation state  " << endl;
+                    }
+                    // set-up a new simulation domain
+                    else
+                    {
+                       PorousMediaSetup(lattice_fluid1, lattice_fluid2,runs);
+                    }
+
+     pcout << endl<< "Starting simulation with rho 1:  " << rho_fluid1[runs] << endl;
+     pcout << endl<< "Starting simulation with rho 2:  " << rho_fluid2[runs] << endl;
+
+    // Main loop over time iterations.
+    for (plint iT=0; iT<maxIter; ++iT) {
+        if (iT%saveIter==0) {
+            writeGifs(lattice_fluid1, lattice_fluid2, iT);
+        }
+
+        // Time iteration for the light fluid.
+        lattice_fluid1.collideAndStream();
+
+        lattice_fluid2.collideAndStream();
+
+        if (iT%statIter==0) {
+            pcout << "Average density fluid one = "
+                  << getStoredAverageDensity<T>(lattice_fluid1);
+            pcout << ", average density fluid two = "
+                  << getStoredAverageDensity<T>(lattice_fluid2) << endl;
+        }
+    }
+
+
+        T rho_F1=rho_fluid1[runs];
+        T rho_F2=rho_fluid2[runs];
+     Array<T, 2> zeroVelocity(0., 0.);
+     initializeAtEquilibrium(lattice_fluid1, Box2D(1, 2, 1, ny-2), rho_fluid1[runs], zeroVelocity);
+     initializeAtEquilibrium(lattice_fluid2, Box2D(1, 2, 1, ny-2), rhoNoFluid, zeroVelocity);
+     initializeAtEquilibrium(lattice_fluid1, Box2D(nx - 2, nx-1, 1, ny-2), rhoNoFluid, zeroVelocity);
+     initializeAtEquilibrium(lattice_fluid2, Box2D(nx - 2, nx-1, 1, ny-2), rho_fluid2[runs], zeroVelocity);
+
+     lattice_fluid1.initialize();
+     lattice_fluid2.initialize();
+     }
+}
+
+
